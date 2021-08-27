@@ -2,11 +2,13 @@
 
 namespace ProcessMaker\Flysystem\Adapter;
 
+use finfo;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\ClientException;
 use GuzzleHttp\Psr7\Stream;
 use GuzzleHttp\Psr7\Utils;
 use Illuminate\Filesystem\FilesystemAdapter;
+use Illuminate\Support\Facades\Storage;
 use InvalidArgumentException;
 use League\Flysystem\Adapter\AbstractAdapter;
 use League\Flysystem\Config;
@@ -197,6 +199,37 @@ class MSGraph extends FilesystemAdapter
 
     public function read($path)
     {
+        if ($this->mode == self::MODE_ONEDRIVE) {
+            try {
+                $driveItem = $this->graph->createRequest('GET', $this->prefix . 'root:/' . $path)
+                    ->setReturnType(Model\DriveItem::class)
+                    ->execute();
+                // Successfully retrieved meta data.
+                // Now get content
+                $itemId = $driveItem->getId();
+                $contentStream = $this->graph->createRequest("GET", "/me/drive/items/" . $itemId . "/content")
+                    ->setReturnType(Stream::class)
+                    ->execute();
+
+                $contents = '';
+                $bufferSize = 8012;
+                // Copy over the data into a string
+                while (!$contentStream->eof()) {
+                    $contents .= $contentStream->read($bufferSize);
+                }
+                return ['contents' => $contents];
+            }catch (ClientException $e) {
+                if ($e->getCode() == 404) {
+                    // Not found, let's return false;
+                    return false;
+                }
+                throw $e;
+            } catch (Exception $e) {
+                throw $e;
+            }
+
+        }
+
         if ($this->mode == self::MODE_SHAREPOINT) {
             try {
                 $driveItem = $this->graph->createRequest('GET', $this->prefix . 'root:/' . $path)
@@ -291,6 +324,7 @@ class MSGraph extends FilesystemAdapter
 
     public function listContents($directory = '', $recursive = false)
     {
+        $results = [];
 //        if ($this->mode == self::MODE_SHAREPOINT) {
 //            try {
 //                    $drive = $this->graph->createRequest('GET', $this->prefix . 'root:/' . $directory)
@@ -341,8 +375,19 @@ class MSGraph extends FilesystemAdapter
                 $children = [];
                 foreach ($driveItems as $driveItem) {
                     $item = $driveItem->getProperties();
+
+                    //Folder Or File
+                    $item['type'] = isset($item['folder']) ? 'folder' : 'file';
                     $item['path'] = $directory . '/' . $driveItem->getName();
+
+                    if($item)
                     $children[] = $item;
+                    if($item['type'] == 'folder'){
+                        if ($recursive) {
+                            $children = array_merge($children, $this->listContents($item['path'], true));
+
+                        }
+                    }
                 }
                 return $children;
             } catch (ClientException $e) {
@@ -351,7 +396,7 @@ class MSGraph extends FilesystemAdapter
                 throw $e;
             }
         }
-        return [];
+        return $results;
     }
 
     public function getMetadata($path)
@@ -366,7 +411,8 @@ class MSGraph extends FilesystemAdapter
 
     public function getMimetype($path)
     {
-
+        $finfo = new finfo(FILEINFO_MIME);
+        return $finfo->buffer($this->get($path));
     }
 
     public function getTimestamp($path)
@@ -378,7 +424,6 @@ class MSGraph extends FilesystemAdapter
     {
 
     }
-
 
 
     /**
@@ -555,6 +600,39 @@ class MSGraph extends FilesystemAdapter
             throw $e;
         }
 
+    }
+
+    public function download($path, $name = null, array $headers = [])
+    {
+
+
+
+
+        $driveItem = $this->graph->createRequest('GET', $this->prefix . 'root:/' . $path)
+            ->setReturnType(Model\DriveItem::class)
+            ->execute();
+        $finalPath = null;
+        //Find the first non-folder resource to download
+        if ($driveItem->getFile()) {
+
+            $itemId = $driveItem->getId();
+            $itemName = $driveItem->getName();
+//            $itemName = str_replace(" ", "_", $itemName);
+//            dd(storage_path('storage/app/graph/'));
+//            if(!file_exists(storage_path('storage/app/graph/'))){
+//                mkdir();
+//            }
+//            dd(storage_path('storage/app/graph/'));
+            Storage::disk('local')->makeDirectory('graph');
+            $finalPath = 'storage/app/graph/'.$itemName;
+//            dd($finalPath);
+            $driveItemContent = $this->graph->createRequest("GET", "/me/drive/items/$itemId/content")
+                ->download($finalPath);
+
+
+        }
+
+        return $finalPath;
     }
 
     public function writeStream($path, $resource, array $config = [])
